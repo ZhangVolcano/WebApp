@@ -50,13 +50,70 @@ async def execute(sql,args):
             raise
         return affected
 
+
+# 这个函数只在下面的 Model元类中被调用， 作用好像是加数量为 num 的'?'
+def create_args_string(num):
+    L = []
+    for _ in range(num):
+    # 源码是 for n in range(num):  我看着反正 n 也不会用上，改成这个就不报错了
+        L.append('?')
+    return ', '.join(L)
+
+
+
+
+
 #ORM:把数据库的表结构映射到对象上
-from orm import Model,StringField,IntegerField
+from orm import Model, StringField, IntegerField, ModelMetaclass
+
 class User(Model):
     #关联数据库表users
     __table__='users'
     id = IntegerField(primary_key=True)
     name = StringField()
+
+
+class ModelMetaclass(type):
+    #cls表示类本身
+    def __new__(cls,name,bases,attrs):
+        if name == 'Model':
+            return type.__new__(cls,name,bases,attrs)
+        tableName = attrs.get('__table__',None) or name
+        logging.info('found model:%s (table:%s)' % (name,tableName))
+        mappings = dict()
+        fields = []
+        primaryKey = None
+        #ditc.items()是以列表形式返回可遍历的key,value
+        for k,v in attrs.items():
+            if isinstance(v,Field):
+                logging.info('found mapping:%s==>%s' % (k,v))
+                mappings[k] = v
+                if v.primary_key:
+                    if primaryKey:
+                        raise RuntimeError('Duplicate primary key for field:%s' % k)
+                    primaryKey = k
+                else:
+                    fields.append(k)
+        if not primaryKey:
+            raise RuntimeError('Primary key not found')
+        for k in mappings.keys():
+            attrs.pop(k)
+        #map(function, iterable, …) 接收函数和迭代对象,返回迭代器
+        #所以这里应该是将fields所有元素都添加''单引号再返回map对象,再转成list对象
+        escaped_fields = list(map(lambda f:'`%s`' % f,fields))
+        attrs['__mappings__'] = mappings
+        attrs['__table__'] = tableName
+        attrs['__primary_key__'] = primaryKey
+        attrs['__fields__'] =fields
+        #','.join(escaped_fields)是将escaped_fields的所有元素以分隔符为,进行合并
+        attrs['__select__'] = 'select `%s`,%s from `%s`' %(primaryKey,','.join(escaped_fields),tableName)
+        #这里调用create_args_string()是基于mysql语句,insert添加多少行
+        #eg:INSERT INTO t able1 VALUES(1),(2),(3),(4),(5);
+        attrs['__insert__'] = 'insert into `%s` (%s,`%s`) values (%s)' %(tableName,','.join(escaped_fields),primaryKey,create_args_string(len(escaped_fields) + 1))
+        attrs['__update__'] = 'update `%s` set %s where `%s` = ?' %(tableName,','.join(map(lambda f:'`%s`=?' % (mappings.get(f).name or f),fields)),primaryKey)
+        attrs['__delete__'] = 'delete from `%s` where  `%s`=?' % (tableName,primaryKey)
+
+        return type.__new__(cls,name,bases,attrs)
 
 #定义Model
 #创建Model类,继承dict,并自定义元类
@@ -100,6 +157,7 @@ class Model(dict,metaclass=ModelMetaclass):
 
 
 #Field和各种Field子类
+
 class Field(object):
     def __init__(self,name,column_type,primary_key,default):
         self.name = name
@@ -114,41 +172,6 @@ class StringField(Field):
     def __init__(self,name=None,primary_key=False,default=None,ddl='varchar(100)'):
         super.__init__(name,ddl,primary_key,default)
 
-
-class ModelMetaclass(type):
-    def __new__(cls,name,bases,attrs):
-        if name == 'Model':
-            return type.__new__(cls,name,bases,attrs)
-        tableName = attrs.get('__table__',None) or name
-        logging.info('found model:%s (table:%s)' % (name,tableName))
-        mappings = dict()
-        fields = []
-        primaryKey = None
-        for k,v in attrs.items():
-            if isinstance(v,Field):
-                logging.info('found mapping:%s==>%s' % (k,v))
-                mappings[k] = v
-                if v.primary_key:
-                    if primaryKey:
-                        raise RuntimeError('Duplicate primary key for field:%s' % k)
-                    primaryKey = k
-                else:
-                    fields.append(k)
-        if not primaryKey:
-            raise RuntimeError('Primary key not found')
-        for k in mappings.keys():
-            attrs.pop(k)
-        escaped_fields = list(map(lambda f:'`%s`' % f,fields))
-        attrs['__mappings__'] = mappings
-        attrs['__table__'] = tableName
-        attrs['__primary_key__'] = primaryKey
-        attrs['__fields__'] =fields
-        attrs['__select__'] = 'select `%s`,%s from `%s`' %(primaryKey,','.join(escaped_fields),tableName)
-        attrs['__insert__'] = 'insert into `%s` (%s,`%s`) value (%s)' %(tableName,','.join(escaped_fields),primaryKey,
-                                                                        create_args_string(len(escaped_fields) + 1))
-        attrs['__update__'] = 'update `%s` set %s where `%s` = ?' %(tableName,','.join(map(lambda f:'`%s`=?' % (mappings.get(f).name or f),fields)),primaryKey)
-        attrs['__delete__'] = 'delete from `%s` where  `%s`=?' % (tableName,primaryKey)
-        return type.__new__(cls,name,bases,attrs)
-
-
-user = yield from User.find('123')
+class IntegerField(Field):
+    def __init__(self, name=None, primary_key=False, default=0):
+        super().__init__(name, 'bigint', primary_key, default)
